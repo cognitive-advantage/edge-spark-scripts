@@ -8,9 +8,44 @@ set -euo pipefail
 # Path to the ifupdown configuration file used on Debian/Proxmox.
 INTERFACES_FILE="/etc/network/interfaces"
 # Interface to enforce DHCP on. Defaults to vmbr0 for common Proxmox setups.
-TARGET_IFACE="${1:-vmbr0}"
-# Optional second argument: --apply to reload networking after file update.
-APPLY_CHANGES="${2:-}" # pass --apply to reload networking
+TARGET_IFACE="vmbr0"
+# Whether to reload networking after file update.
+APPLY_CHANGES=""
+
+# Parse arguments:
+# - interface name (optional)
+# - --apply (optional)
+# Supports either order, e.g.:
+#   ensure-dhcp.sh
+#   ensure-dhcp.sh --apply
+#   ensure-dhcp.sh vmbr1
+#   ensure-dhcp.sh vmbr1 --apply
+#   ensure-dhcp.sh --apply vmbr1
+for arg in "$@"; do
+  case "${arg}" in
+    --apply)
+      APPLY_CHANGES="--apply"
+      ;;
+    -h|--help)
+      echo "Usage: $0 [interface] [--apply]"
+      echo "Default interface: vmbr0"
+      exit 0
+      ;;
+    --*)
+      echo "Error: unknown option: ${arg}"
+      echo "Usage: $0 [interface] [--apply]"
+      exit 1
+      ;;
+    *)
+      if [[ "${TARGET_IFACE}" != "vmbr0" ]]; then
+        echo "Error: multiple interfaces provided: ${TARGET_IFACE} and ${arg}"
+        echo "Usage: $0 [interface] [--apply]"
+        exit 1
+      fi
+      TARGET_IFACE="${arg}"
+      ;;
+  esac
+done
 
 # Require root because we modify system networking config.
 if [[ "${EUID}" -ne 0 ]]; then
