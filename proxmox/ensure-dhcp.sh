@@ -47,6 +47,15 @@ for arg in "$@"; do
   esac
 done
 
+# Validate interface name before touching system config.
+# Linux interface names may include alnum, underscore, dot, colon, and hyphen,
+# but must not start with a dash.
+if [[ "${TARGET_IFACE}" == -* || ! "${TARGET_IFACE}" =~ ^[[:alnum:]_.:-]+$ ]]; then
+  echo "Error: invalid interface name: ${TARGET_IFACE}"
+  echo "Usage: $0 [interface] [--apply]"
+  exit 1
+fi
+
 # Require root because we modify system networking config.
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Error: run as root (sudo)."
@@ -56,6 +65,15 @@ fi
 # Ensure the target config file exists before editing.
 if [[ ! -f "${INTERFACES_FILE}" ]]; then
   echo "Error: ${INTERFACES_FILE} not found."
+  exit 1
+fi
+
+# Guard against a legacy bad stanza produced by older argument parsing.
+# If present, applying networking can fail with dhclient "Unknown command: --apply".
+if grep -Eq '^[[:space:]]*(auto|allow-hotplug|iface)[[:space:]]+--apply([[:space:]]|$)' "${INTERFACES_FILE}"; then
+  echo "Error: detected invalid interface stanza '--apply' in ${INTERFACES_FILE}."
+  echo "Fix by removing lines that reference '--apply' (for example: 'auto --apply' and 'iface --apply ...')."
+  echo "Tip: restore from a backup file like ${INTERFACES_FILE}.bak.<timestamp> if available."
   exit 1
 fi
 
