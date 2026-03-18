@@ -1,0 +1,17 @@
+swarm:
+  name: lab-swarm01
+  template: 1002
+  vlans:
+    - routable: 221
+    - cluster: 921
+  secrets:
+    proxmox: ./proxmox.secrets
+    lab: ./lab.secrets
+  nodes:
+    - 10.254.221.11
+    - 10.254.221.12
+    - 10.254.221.13
+  routable_nodes:
+    - 192.168.221.145
+    - 192.168.221.95
+    - 192.168.221.200
