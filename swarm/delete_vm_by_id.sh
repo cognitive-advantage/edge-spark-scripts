@@ -52,7 +52,7 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 command -v sshpass >/dev/null 2>&1 || die "sshpass is required"
 
 ssh_exec() {
-  sshpass -p "$PROXMOX_PASS" ssh -n "${SSH_OPTS[@]}" \
+  sshpass -p "$PROXMOX_PASS" ssh "${SSH_OPTS[@]}" \
     -o BatchMode=no \
     -o PreferredAuthentications=password,keyboard-interactive \
     -o PubkeyAuthentication=no \
@@ -80,6 +80,34 @@ for node_path in /etc/pve/nodes/*; do
   node="$(basename "$node_path")"
   attempted=$((attempted + 1))
   echo "Attempting stop/delete for VM ${vmid} on ${node}"
+
+  config_json="$(pvesh get "/nodes/${node}/qemu/${vmid}/config" --output-format json 2>/dev/null || true)"
+  if [[ -n "$config_json" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        echo "Deleting config key ${key} on ${node}"
+        pvesh set "/nodes/${node}/qemu/${vmid}/config" --delete "$key" >/dev/null 2>&1 || true
+      done < <(printf '%s\n' "$config_json" | jq -r '
+        to_entries[]
+        | select(
+            (.key | test("^unused[0-9]+$"))
+            or (
+              (.key | test("^(ide|sata|scsi)[0-9]+$"))
+              and ((.value | tostring) | test("cloudinit"))
+            )
+          )
+        | .key
+      ')
+    else
+      while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        echo "Deleting config key ${key} on ${node}"
+        pvesh set "/nodes/${node}/qemu/${vmid}/config" --delete "$key" >/dev/null 2>&1 || true
+      done < <(printf '%s\n' "$config_json" | grep -oE '"unused[0-9]+"' | tr -d '"')
+    fi
+  fi
+
   pvesh create "/nodes/${node}/qemu/${vmid}/status/stop" --timeout 60 >/dev/null 2>&1 || true
   pvesh delete "/nodes/${node}/qemu/${vmid}" --purge 1 --destroy-unreferenced-disks 1 --skiplock 1 >/dev/null 2>&1 || true
 done
@@ -106,16 +134,43 @@ vmid="$1"
 
 clear_cloudinit_watchers() {
   local location="$1"
-  local status watcher_ip
+  local image_name="${2:-vm-${vmid}-cloudinit}"
+  local status
+  local tries=60
+  local i
 
-  status="$(rbd status "${location}/vm-${vmid}-cloudinit" 2>/dev/null || true)"
-  [[ -n "$status" ]] || return 0
+  for ((i = 1; i <= tries; i++)); do
+    status="$(rbd status "${location}/${image_name}" 2>/dev/null || true)"
+    [[ -n "$status" ]] || return 0
 
-  while IFS= read -r watcher_ip; do
-    [[ -n "$watcher_ip" ]] || continue
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${watcher_ip}" \
-      "pkill -9 -f '/usr/bin/kvm -id ${vmid}' || true" >/dev/null 2>&1 || true
-  done < <(printf '%s\n' "$status" | sed -n 's/.*watcher=\([0-9.]*\):.*/\1/p' | sort -u)
+    if printf '%s\n' "$status" | grep -Eq 'Watchers:[[:space:]]*none'; then
+      return 0
+    fi
+
+    if ! printf '%s\n' "$status" | grep -q 'watcher='; then
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  return 1
+}
+
+rm_rbd_image_with_retries() {
+  local location="$1"
+  local image_name="$2"
+  local tries=20
+  local i
+
+  printf 'y\n' | rbd snap purge "${location}/${image_name}" >/dev/null 2>&1 || true
+  for ((i = 1; i <= tries; i++)); do
+    if printf 'y\n' | rbd rm "${location}/${image_name}" >/dev/null 2>&1; then
+      return 0
+    fi
+    clear_cloudinit_watchers "$location" "$image_name" || true
+  done
+  return 1
 }
 
 cleanup_rbd_images() {
@@ -123,24 +178,17 @@ cleanup_rbd_images() {
   local img
   while IFS= read -r img; do
     [[ -n "$img" ]] || continue
-    rbd snap purge "${location}/${img}" >/dev/null 2>&1 || true
-    if ! rbd rm "${location}/${img}" >/dev/null 2>&1; then
-      if [[ "$img" == "vm-${vmid}-cloudinit" ]]; then
-        clear_cloudinit_watchers "$location"
-        sleep 1
-        rbd rm "${location}/${img}" >/dev/null 2>&1 || true
-      fi
-    fi
+    rm_rbd_image_with_retries "$location" "$img" >/dev/null 2>&1 || true
   done < <(rbd ls "$location" 2>/dev/null | grep -E "^vm-${vmid}-(cloudinit|disk-[0-9]+)$" || true)
 }
 
 if command -v pvesm >/dev/null 2>&1; then
-  pvesm free "vm-os:vm-${vmid}-cloudinit" >/dev/null 2>&1 || true
+  printf 'y\n' | pvesm free "vm-os:vm-${vmid}-cloudinit" >/dev/null 2>&1 || true
   while IFS= read -r storage; do
     [[ -n "$storage" ]] || continue
     while IFS= read -r volid; do
       [[ -n "$volid" ]] || continue
-      pvesm free "$volid" >/dev/null 2>&1 || true
+      printf 'y\n' | pvesm free "$volid" >/dev/null 2>&1 || true
     done < <(pvesm list "$storage" 2>/dev/null | awk 'NR>1 {print $1}' | grep -E "vm-${vmid}-(cloudinit|disk-[0-9]+)" || true)
   done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | sort -u)
 fi
@@ -164,7 +212,7 @@ if command -v pvesm >/dev/null 2>&1; then
     [[ -n "$storage" ]] || continue
     while IFS= read -r volid; do
       [[ -n "$volid" ]] || continue
-      pvesm free "$volid" >/dev/null 2>&1 || true
+      printf 'y\n' | pvesm free "$volid" >/dev/null 2>&1 || true
     done < <(pvesm list "$storage" 2>/dev/null | awk 'NR>1 {print $1}' | grep -E "vm-${vmid}-(cloudinit|disk-[0-9]+)" || true)
   done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | sort -u)
 fi
@@ -180,7 +228,8 @@ if qm status "$vmid" >/dev/null 2>&1; then
 fi
 
 if pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
-  | sed -n 's/.*"vmid"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
+  | grep -oE '"vmid"[[:space:]]*:[[:space:]]*[0-9]+' \
+  | sed -E 's/.*:[[:space:]]*([0-9]+)/\1/' \
   | grep -qx "$vmid"; then
   echo "cluster still has VM $vmid" >&2
   exit 1
@@ -220,11 +269,13 @@ remote_ssh "LC_ALL=C LANG=C bash -s" <<'EOF_REMOTE_SWEEP'
 set -euo pipefail
 
 active_vmids_file="$(mktemp)"
+orphan_list_file="$(mktemp)"
 pvesm_orphan_count=0
 rbd_orphan_count=0
 
 pvesh get /cluster/resources --type vm --output-format json \
-  | sed -n 's/.*"vmid"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
+  | grep -oE '"vmid"[[:space:]]*:[[:space:]]*[0-9]+' \
+  | sed -E 's/.*:[[:space:]]*([0-9]+)/\1/' \
   | sort -u > "$active_vmids_file"
 
 is_orphan_vmid() {
@@ -240,28 +291,77 @@ extract_vmid_from_name() {
 clear_rbd_watchers() {
   local location="$1"
   local image="$2"
-  local status watcher_ip
+  local status
+  local tries=60
+  local i
 
-  status="$(rbd status "${location}/${image}" 2>/dev/null || true)"
-  [[ -n "$status" ]] || return 0
+  for ((i = 1; i <= tries; i++)); do
+    status="$(rbd status "${location}/${image}" 2>/dev/null || true)"
+    [[ -n "$status" ]] || return 0
 
-  while IFS= read -r watcher_ip; do
-    [[ -n "$watcher_ip" ]] || continue
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${watcher_ip}" \
-      "pkill -9 -f '/usr/bin/kvm -id [0-9]+' || true" >/dev/null 2>&1 || true
-  done < <(printf '%s\n' "$status" | sed -n 's/.*watcher=\([0-9.]*\):.*/\1/p' | sort -u)
+    if printf '%s\n' "$status" | grep -Eq 'Watchers:[[:space:]]*none'; then
+      return 0
+    fi
+
+    if ! printf '%s\n' "$status" | grep -q 'watcher='; then
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  return 1
+}
+
+rm_orphan_rbd_image_with_retries() {
+  local location="$1"
+  local image="$2"
+  local tries=20
+  local i
+
+  printf 'y\n' | rbd snap purge "${location}/${image}" >/dev/null 2>&1 || true
+  for ((i = 1; i <= tries; i++)); do
+    if printf 'y\n' | rbd rm "${location}/${image}" >/dev/null 2>&1; then
+      return 0
+    fi
+    clear_rbd_watchers "$location" "$image" || true
+  done
+  return 1
 }
 
 delete_orphan_rbd_image() {
   local location="$1"
   local image="$2"
 
-  rbd snap purge "${location}/${image}" >/dev/null 2>&1 || true
-  if ! rbd rm "${location}/${image}" >/dev/null 2>&1; then
-    clear_rbd_watchers "$location" "$image"
-    sleep 1
-    rbd rm "${location}/${image}" >/dev/null 2>&1 || true
+  rm_orphan_rbd_image_with_retries "$location" "$image" >/dev/null 2>&1 || true
+}
+
+free_orphan_volid_with_fallback() {
+  local volid="$1"
+  local storage image_path location image_name
+
+  if printf 'y\n' | pvesm free "$volid" >/dev/null 2>&1; then
+    return 0
   fi
+
+  storage="${volid%%:*}"
+  image_path="${volid#*:}"
+
+  if [[ "$image_path" == */* ]]; then
+    location="${storage}/${image_path%/*}"
+    image_name="${image_path##*/}"
+  else
+    location="$storage"
+    image_name="$image_path"
+  fi
+
+  rm_orphan_rbd_image_with_retries "$location" "$image_name" >/dev/null 2>&1 || true
+
+  if pvesm list "$storage" 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fxq "$volid"; then
+    return 1
+  fi
+
+  return 0
 }
 
 if command -v pvesm >/dev/null 2>&1; then
@@ -279,9 +379,13 @@ if command -v pvesm >/dev/null 2>&1; then
       [[ -n "$candidate_vmid" ]] || continue
 
       if is_orphan_vmid "$candidate_vmid"; then
+        printf '%s\n' "$volid" >> "$orphan_list_file"
         echo "Deleting orphan volume: $volid"
-        pvesm free "$volid" >/dev/null 2>&1 || true
-        pvesm_orphan_count=$((pvesm_orphan_count + 1))
+        if free_orphan_volid_with_fallback "$volid"; then
+          pvesm_orphan_count=$((pvesm_orphan_count + 1))
+        else
+          echo "Failed to remove orphan volume: $volid"
+        fi
       fi
     done < <(pvesm list "$storage" 2>/dev/null | awk 'NR>1 {print $1}')
   done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | sort -u)
@@ -299,6 +403,7 @@ if command -v rbd >/dev/null 2>&1; then
       [[ -n "$candidate_vmid" ]] || continue
 
       if is_orphan_vmid "$candidate_vmid"; then
+        printf '%s\n' "${pool}/${image}" >> "$orphan_list_file"
         echo "Deleting orphan RBD image: ${pool}/${image}"
         delete_orphan_rbd_image "$pool" "$image"
         rbd_orphan_count=$((rbd_orphan_count + 1))
@@ -317,6 +422,7 @@ if command -v rbd >/dev/null 2>&1; then
         [[ -n "$candidate_vmid" ]] || continue
 
         if is_orphan_vmid "$candidate_vmid"; then
+          printf '%s\n' "${location}/${image}" >> "$orphan_list_file"
           echo "Deleting orphan RBD image: ${location}/${image}"
           delete_orphan_rbd_image "$location" "$image"
           rbd_orphan_count=$((rbd_orphan_count + 1))
@@ -326,7 +432,38 @@ if command -v rbd >/dev/null 2>&1; then
   done < <(rbd pool ls 2>/dev/null || true)
 fi
 
+echo "Orphan drive candidates this run:"
+if [[ -s "$orphan_list_file" ]]; then
+  sort -u "$orphan_list_file"
+else
+  echo "(none)"
+fi
+
+echo "Remaining orphan cloud-init drives after sweep:"
+if command -v pvesm >/dev/null 2>&1; then
+  if pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | while IFS= read -r storage; do
+    pvesm list "$storage" 2>/dev/null | awk 'NR>1 {print $1}'
+  done | grep -E 'vm-[0-9]+-cloudinit' | while IFS= read -r volid; do
+    candidate_vmid="$(printf '%s\n' "$volid" | sed -n 's/.*vm-\([0-9]\+\)-.*/\1/p')"
+    [[ -n "$candidate_vmid" ]] || continue
+    is_orphan_vmid "$candidate_vmid" && echo "$volid"
+  done | sort -u | grep -q .; then
+    pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | while IFS= read -r storage; do
+      pvesm list "$storage" 2>/dev/null | awk 'NR>1 {print $1}'
+    done | grep -E 'vm-[0-9]+-cloudinit' | while IFS= read -r volid; do
+      candidate_vmid="$(printf '%s\n' "$volid" | sed -n 's/.*vm-\([0-9]\+\)-.*/\1/p')"
+      [[ -n "$candidate_vmid" ]] || continue
+      is_orphan_vmid "$candidate_vmid" && echo "$volid"
+    done | sort -u
+  else
+    echo "(none)"
+  fi
+else
+  echo "(pvesm unavailable)"
+fi
+
 rm -f "$active_vmids_file"
+rm -f "$orphan_list_file"
 echo "Orphan sweep complete. pvesm deleted: $pvesm_orphan_count, rbd deleted: $rbd_orphan_count"
 EOF_REMOTE_SWEEP
 
