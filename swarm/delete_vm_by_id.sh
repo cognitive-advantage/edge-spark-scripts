@@ -70,30 +70,22 @@ remote_bash_with_vmid() {
 ssh_exec true >/dev/null 2>&1 || die "cannot authenticate to ${PROXMOX_USER}@${PROXMOX_HOST} using proxmox secrets"
 
 log "Deleting VM ${VMID} on ${PROXMOX_HOST}"
+remote_bash_with_vmid <<'EOF_REMOTE_DELETE'
+set -euo pipefail
+vmid="$1"
+attempted=0
 
-if remote_ssh "qm status ${VMID} >/dev/null 2>&1"; then
-  if remote_ssh "qm config ${VMID} | grep -q '^lock:'"; then
-    log "Unlocking VM ${VMID}"
-    remote_ssh "qm unlock ${VMID} >/dev/null 2>&1 || true"
-  fi
+for node_path in /etc/pve/nodes/*; do
+  [[ -d "$node_path" ]] || continue
+  node="$(basename "$node_path")"
+  attempted=$((attempted + 1))
+  echo "Attempting stop/delete for VM ${vmid} on ${node}"
+  pvesh create "/nodes/${node}/qemu/${vmid}/status/stop" --timeout 60 >/dev/null 2>&1 || true
+  pvesh delete "/nodes/${node}/qemu/${vmid}" --purge 1 --destroy-unreferenced-disks 1 --skiplock 1 >/dev/null 2>&1 || true
+done
 
-  if remote_ssh "qm status ${VMID} | grep -q 'status: running'"; then
-    log "Stopping running VM ${VMID}"
-    remote_ssh "qm stop ${VMID} --timeout 60 >/dev/null 2>&1 || true"
-    sleep 2
-  fi
-
-  if remote_ssh "qm status ${VMID} | grep -q 'status: running'"; then
-    log "Force stopping VM ${VMID}"
-    remote_ssh "qm stop ${VMID} --skiplock 1 --timeout 30 >/dev/null 2>&1 || true"
-    sleep 2
-  fi
-
-  log "Destroying VM ${VMID}"
-  remote_ssh "qm destroy ${VMID} --purge 1 --destroy-unreferenced-disks 1 >/dev/null 2>&1 || true"
-else
-  log "VM ${VMID} not found in qm; continuing with stale artifact cleanup"
-fi
+echo "Stop/delete attempts completed across ${attempted} node endpoints"
+EOF_REMOTE_DELETE
 
 log "Cleaning cluster metadata and lock artifacts for VM ${VMID}"
 remote_bash_with_vmid <<'EOF_REMOTE_META'
@@ -184,7 +176,13 @@ set -euo pipefail
 vmid="$1"
 
 if qm status "$vmid" >/dev/null 2>&1; then
-  echo "qm still has VM $vmid" >&2
+  true
+fi
+
+if pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
+  | sed -n 's/.*"vmid"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
+  | grep -qx "$vmid"; then
+  echo "cluster still has VM $vmid" >&2
   exit 1
 fi
 
