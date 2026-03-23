@@ -57,17 +57,19 @@ if [[ "$(printf '%s\n' "${CLUSTER_NODE_ADDRESSES[@]}" | sort | uniq | wc -l)" -n
 fi
 
 mapfile -t ROUTABLE_NODE_ADDRESSES < <(yq e -r '.swarm.routable_nodes[]?' "$CONFIG_FILE")
-if [[ "${#ROUTABLE_NODE_ADDRESSES[@]}" -gt 0 ]]; then
-  if [[ "${#ROUTABLE_NODE_ADDRESSES[@]}" -ne "${#CLUSTER_NODE_ADDRESSES[@]}" ]]; then
-    die "swarm.routable_nodes count (${#ROUTABLE_NODE_ADDRESSES[@]}) must match swarm.nodes count (${#CLUSTER_NODE_ADDRESSES[@]})"
-  fi
-
-  if [[ "$(printf '%s\n' "${ROUTABLE_NODE_ADDRESSES[@]}" | sort | uniq | wc -l)" -ne "${#ROUTABLE_NODE_ADDRESSES[@]}" ]]; then
-    die "duplicate IPs detected in swarm.routable_nodes"
-  fi
-
-  NODE_ADDRESSES=("${ROUTABLE_NODE_ADDRESSES[@]}")
+if [[ "${#ROUTABLE_NODE_ADDRESSES[@]}" -eq 0 ]]; then
+  die "missing swarm.routable_nodes[] in $CONFIG_FILE; add one management IP per node"
 fi
+
+if [[ "${#ROUTABLE_NODE_ADDRESSES[@]}" -ne "${#CLUSTER_NODE_ADDRESSES[@]}" ]]; then
+  die "swarm.routable_nodes count (${#ROUTABLE_NODE_ADDRESSES[@]}) must match swarm.nodes count (${#CLUSTER_NODE_ADDRESSES[@]})"
+fi
+
+if [[ "$(printf '%s\n' "${ROUTABLE_NODE_ADDRESSES[@]}" | sort | uniq | wc -l)" -ne "${#ROUTABLE_NODE_ADDRESSES[@]}" ]]; then
+  die "duplicate IPs detected in swarm.routable_nodes"
+fi
+
+NODE_ADDRESSES=("${ROUTABLE_NODE_ADDRESSES[@]}")
 
 CONFIG_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
 
@@ -83,18 +85,6 @@ LAB_SSH_USER="${LAB_SECRETS_LINE%%:*}"
 LAB_SSH_PASS="${LAB_SECRETS_LINE#*:}"
 [[ -n "$LAB_SSH_USER" && -n "$LAB_SSH_PASS" ]] || die "invalid lab secrets format in $LAB_SECRETS_PATH (empty user/password)"
 
-PROXMOX_SECRETS_PATH=$(yq e -r '.swarm.secrets.proxmox // "./proxmox.secrets"' "$CONFIG_FILE")
-if [[ "$PROXMOX_SECRETS_PATH" != /* ]]; then
-  PROXMOX_SECRETS_PATH="$CONFIG_DIR/$PROXMOX_SECRETS_PATH"
-fi
-[[ -f "$PROXMOX_SECRETS_PATH" ]] || die "proxmox secrets file not found: $PROXMOX_SECRETS_PATH"
-
-PROXMOX_SECRETS_LINE="$(head -n 1 "$PROXMOX_SECRETS_PATH" | tr -d '\r')"
-[[ "$PROXMOX_SECRETS_LINE" == *:* ]] || die "invalid proxmox secrets format in $PROXMOX_SECRETS_PATH (expected user:password)"
-PROXMOX_SSH_USER="${PROXMOX_SECRETS_LINE%%:*}"
-PROXMOX_SSH_PASS="${PROXMOX_SECRETS_LINE#*:}"
-[[ -n "$PROXMOX_SSH_USER" && -n "$PROXMOX_SSH_PASS" ]] || die "invalid proxmox secrets format in $PROXMOX_SECRETS_PATH (empty user/password)"
-
 {
   declare -p CONFIG_FILE
   declare -p FIRST_NODE_ACCESS_OVERRIDE
@@ -109,7 +99,4 @@ PROXMOX_SSH_PASS="${PROXMOX_SECRETS_LINE#*:}"
   declare -p LAB_SECRETS_PATH
   declare -p LAB_SSH_USER
   declare -p LAB_SSH_PASS
-  declare -p PROXMOX_SECRETS_PATH
-  declare -p PROXMOX_SSH_USER
-  declare -p PROXMOX_SSH_PASS
 } > "$STATE_FILE"

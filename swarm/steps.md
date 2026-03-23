@@ -93,14 +93,13 @@ Fail conditions:
 
 Purpose:
 
-- Use swarm.routable_nodes if present.
-- Otherwise discover management IPs via Proxmox guest-agent.
+- Use explicit swarm.routable_nodes management addresses.
 - Build management-to-cluster IP mapping.
 
 Input:
 
 - derived node lists
-- proxmox credentials
+- management SSH addresses
 
 Output:
 
@@ -111,9 +110,8 @@ Output:
 
 Fail conditions:
 
-- discovery node lookup fails
-- guest-agent query fails
-- no reachable management candidate
+- missing swarm.routable_nodes entries
+- routable_nodes and nodes count mismatch
 
 ### Stage 30: Preflight Connectivity
 

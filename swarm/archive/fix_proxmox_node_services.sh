@@ -51,8 +51,7 @@ if [[ "${#CLUSTER_IPS[@]}" -lt 1 ]]; then
 fi
 
 if [[ "${#MGMT_IPS[@]}" -eq 0 ]]; then
-  log "swarm.routable_nodes[] not found, falling back to swarm.nodes[] for management access"
-  MGMT_IPS=("${CLUSTER_IPS[@]}")
+  die "missing swarm.routable_nodes[]; provide one management IP per node"
 fi
 
 if [[ "${#MGMT_IPS[@]}" -ne "${#CLUSTER_IPS[@]}" ]]; then

@@ -91,11 +91,6 @@ done
   declare -p LAB_SECRETS_PATH
   declare -p LAB_SSH_USER
   declare -p LAB_SSH_PASS
-  declare -p PROXMOX_SECRETS_PATH
-  declare -p PROXMOX_SSH_USER
-  declare -p PROXMOX_SSH_PASS
-  declare -p PROXMOX_DISCOVERY_HOST
-  declare -p PROXMOX_DISCOVERY_NODE
   declare -p CLUSTER_IP_BY_NODE_ADDRESS
   declare -p FIRST_NODE_CLUSTER_ADDRESS
   declare -p FIRST_NODE_ACCESS_ADDRESS
